@@ -1,1 +1,182 @@
-#
+{% extends "base.html" %}
+
+{% block title %}Dashboard - Shortzlinks{% endblock %}
+
+{% block content %}
+<div class="dashboard-container">
+    <div class="dashboard-header">
+        <h1>Dashboard</h1>
+        <p>Welcome, <strong>{{ user.username }}</strong>!</p>
+    </div>
+
+    <!-- Stats Cards -->
+    <div class="stats-grid">
+        <div class="stat-card">
+            <div class="stat-icon"><i class="fas fa-link"></i></div>
+            <div class="stat-info">
+                <h3>Total Links</h3>
+                <p class="stat-number">{{ total_links }}</p>
+            </div>
+        </div>
+
+        <div class="stat-card">
+            <div class="stat-icon"><i class="fas fa-mouse"></i></div>
+            <div class="stat-info">
+                <h3>Total Clicks</h3>
+                <p class="stat-number">{{ total_clicks }}</p>
+            </div>
+        </div>
+
+        <div class="stat-card">
+            <div class="stat-icon"><i class="fas fa-dollar-sign"></i></div>
+            <div class="stat-info">
+                <h3>Total Earnings</h3>
+                <p class="stat-number">${{ "%.2f"|format(total_earnings) }}</p>
+            </div>
+        </div>
+
+        <div class="stat-card">
+            <div class="stat-icon"><i class="fas fa-chart-line"></i></div>
+            <div class="stat-info">
+                <h3>Avg CPM</h3>
+                <p class="stat-number">${{ "%.2f"|format(avg_cpm) }}</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Create Link Section -->
+    <section class="create-link-section">
+        <h2>Create New Short Link</h2>
+        <form id="shortenForm" class="shorten-form">
+            <div class="input-group">
+                <input type="url" id="url" placeholder="Paste your long URL here..." required>
+                <button type="submit" class="btn btn-primary">
+                    <i class="fas fa-compress"></i> Shorten
+                </button>
+            </div>
+        </form>
+    </section>
+
+    <!-- Today's & This Month's Report -->
+    <div class="reports-grid">
+        <div class="report-card">
+            <h3>Today's Report</h3>
+            <div class="report-metrics">
+                <div class="metric">
+                    <div class="metric-label">Views</div>
+                    <div class="metric-value">{{ today_clicks }}</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Earnings</div>
+                    <div class="metric-value">${{ "%.2f"|format(today_earnings) }}</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="report-card">
+            <h3>This Month's Report</h3>
+            <div class="report-metrics">
+                <div class="metric">
+                    <div class="metric-label">Views</div>
+                    <div class="metric-value">{{ month_clicks }}</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Earnings</div>
+                    <div class="metric-value">${{ "%.2f"|format(month_earnings) }}</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Top Links -->
+    <section class="top-links-section">
+        <h2>Your Links</h2>
+        <div id="linksList" class="links-list">
+            {% for url in urls %}
+            <div class="url-item">
+                <div class="url-info">
+                    <div class="short-link">{{ url.short_code }}</div>
+                    <small>{{ url.original_url[:60] }}</small>
+                    <div class="url-meta">
+                        <span>{{ url.clicks }} clicks</span>
+                        <span>${{ "%.2f"|format(url.earnings) }}</span>
+                    </div>
+                </div>
+                <div class="url-actions">
+                    <button class="btn btn-small" onclick="copyLink('{{ url.short_code }}')">
+                        <i class="fas fa-copy"></i>
+                    </button>
+                    <button class="btn btn-small" onclick="deleteLink({{ url.id }})">
+                        <i class="fas fa-trash"></i>
+                    </button>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </section>
+</div>
+
+<!-- Copy Modal -->
+<div id="copyModal" class="modal">
+    <div class="modal-content">
+        <span class="close">&times;</span>
+        <h2>Your Shortened Link</h2>
+        <input type="text" id="shortenedUrlInput" readonly>
+        <button id="copyBtn" class="btn btn-primary">Copy Link</button>
+        <div id="qrSection">
+            <h3>QR Code</h3>
+            <img id="qrCode" src="" alt="QR Code">
+        </div>
+    </div>
+</div>
+
+<script>
+document.getElementById('shortenForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const url = document.getElementById('url').value;
+    
+    try {
+        const response = await fetch('/api/shorten', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url })
+        });
+        
+        const data = await response.json();
+        
+        if (response.ok) {
+            document.getElementById('shortenedUrlInput').value = data.short_url;
+            document.getElementById('qrCode').src = 'data:image/png;base64,' + data.qr_code;
+            document.getElementById('copyModal').style.display = 'block';
+            document.getElementById('shortenForm').reset();
+            location.reload();
+        }
+    } catch (error) {
+        alert('Error shortening URL');
+    }
+});
+
+function copyLink(code) {
+    const url = window.location.origin + '/' + code;
+    navigator.clipboard.writeText(url);
+    alert('Link copied!');
+}
+
+function deleteLink(id) {
+    if (confirm('Delete this link?')) {
+        fetch(`/api/url/${id}/delete`, { method: 'DELETE' })
+            .then(() => location.reload());
+    }
+}
+
+document.querySelector('.close').addEventListener('click', () => {
+    document.getElementById('copyModal').style.display = 'none';
+});
+
+document.getElementById('copyBtn').addEventListener('click', () => {
+    const input = document.getElementById('shortenedUrlInput');
+    navigator.clipboard.writeText(input.value);
+    alert('Copied to clipboard!');
+});
+</script>
+{% endblock %}
