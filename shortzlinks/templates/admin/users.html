@@ -1,0 +1,123 @@
+{% extends "admin/base.html" %}
+
+{% block page_title %}Users Management{% endblock %}
+
+{% block content %}
+<style>
+    .search-bar {
+        margin-bottom: 20px;
+        display: flex;
+        gap: 10px;
+    }
+
+    .search-bar input {
+        flex: 1;
+        padding: 10px 15px;
+        border: 1px solid #e2e8f0;
+        border-radius: 5px;
+    }
+
+    .search-bar button {
+        background: #667eea;
+        color: white;
+        border: none;
+        padding: 10px 20px;
+        border-radius: 5px;
+        cursor: pointer;
+    }
+
+    .pagination {
+        text-align: center;
+        margin-top: 20px;
+    }
+
+    .pagination a {
+        padding: 8px 12px;
+        margin: 0 2px;
+        background: white;
+        border: 1px solid #e2e8f0;
+        border-radius: 5px;
+        text-decoration: none;
+        color: #333;
+    }
+
+    .pagination a.active {
+        background: #667eea;
+        color: white;
+    }
+</style>
+
+<!-- Search Bar -->
+<form method="GET" class="search-bar">
+    <input type="text" name="search" placeholder="Search users by username or email..." value="{{ request.args.get('search', '') }}">
+    <button type="submit">Search</button>
+</form>
+
+<!-- Users Table -->
+<div class="admin-table">
+    <table>
+        <thead>
+            <tr>
+                <th>Username</th>
+                <th>Email</th>
+                <th>Total Links</th>
+                <th>Total Earnings</th>
+                <th>Joined</th>
+                <th>Status</th>
+                <th>Action</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for user in users %}
+            <tr>
+                <td><strong>{{ user.username }}</strong></td>
+                <td>{{ user.email }}</td>
+                <td>
+                    <span class="badge badge-info">
+                        {{ user.urls|length|default(0) }}
+                    </span>
+                </td>
+                <td>${{ "%.2f"|format(user.total_earnings) }}</td>
+                <td>{{ user.created_at.strftime('%Y-%m-%d') }}</td>
+                <td>
+                    {% if user.is_banned %}
+                    <span class="badge badge-danger">Banned</span>
+                    {% else %}
+                    <span class="badge badge-success">Active</span>
+                    {% endif %}
+                </td>
+                <td>
+                    <a href="/admin/user/{{ user.id }}" class="btn-small btn-info">View</a>
+                    <button class="btn-small btn-danger" onclick="confirmBan('{{ user.id }}', {{ user.is_banned|lower }})">
+                        {% if user.is_banned %}Unban{% else %}Ban{% endif %}
+                    </button>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<!-- Pagination -->
+<div class="pagination">
+    <a href="?page=1">First</a>
+    {% for i in range(1, (total // 20) + 2) %}
+    <a href="?page={{ i }}" {% if i == page %}class="active"{% endif %}>{{ i }}</a>
+    {% endfor %}
+    <a href="?page={{ (total // 20) + 1 }}">Last</a>
+</div>
+
+<script>
+    function confirmBan(userId, isBanned) {
+        const action = isBanned ? 'Unban' : 'Ban';
+        if (confirm(`Are you sure you want to ${action} this user?`)) {
+            const endpoint = isBanned ? '/admin/api/user/' + userId + '/unban' : '/admin/api/user/' + userId + '/ban';
+            fetch(endpoint, { method: 'POST' })
+                .then(r => r.json())
+                .then(d => {
+                    if (d.success) location.reload();
+                });
+        }
+    }
+</script>
+{% endblock %}
