@@ -8,6 +8,7 @@ import qrcode
 import io
 import base64
 from datetime import datetime, timedelta
+from functools import wraps
 import requests
 import os
 from dotenv import load_dotenv
@@ -750,6 +751,515 @@ def redirect_url(short_code):
     user.save()
     
     return redirect(shortened.original_url)
+
+
+#_______________________________________________________________________
+
+# Add Admin User Model
+class AdminUser(Document):
+    username = StringField(unique=True, required=True)
+    email = StringField(unique=True, required=True)
+    password = StringField(required=True)
+    role = StringField(default='admin')  # admin, moderator, support
+    permissions = ListField(StringField())
+    is_active = BooleanField(default=True)
+    created_at = DateTimeField(default=datetime.utcnow)
+    last_login = DateTimeField(null=True)
+    
+    meta = {
+        'collection': 'admin_users',
+        'indexes': ['username', 'email']
+    }
+
+    def set_password(self, password):
+        self.password = generate_password_hash(password)
+
+    def check_password(self, password):
+        return check_password_hash(self.password, password)
+
+# Admin decorator
+def admin_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'admin_id' not in session:
+            return redirect(url_for('admin_login'))
+        admin = AdminUser.objects(id=session['admin_id']).first()
+        if not admin or not admin.is_active:
+            return redirect(url_for('admin_login'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+# ==================== ADMIN AUTHENTICATION ====================
+
+@app.route('/admin/login', methods=['GET', 'POST'])
+def admin_login():
+    if request.method == 'POST':
+        data = request.get_json()
+        username = data.get('username')
+        password = data.get('password')
+        
+        admin = AdminUser.objects(username=username).first()
+        
+        if not admin or not admin.check_password(password):
+            return jsonify({'error': 'Invalid credentials'}), 401
+        
+        if not admin.is_active:
+            return jsonify({'error': 'Account disabled'}), 403
+        
+        session['admin_id'] = str(admin.id)
+        session['admin_username'] = admin.username
+        admin.last_login = datetime.utcnow()
+        admin.save()
+        
+        return jsonify({'success': 'Login successful'}), 200
+    
+    return render_template('admin/login.html')
+
+@app.route('/admin/logout')
+def admin_logout():
+    session.clear()
+    return redirect(url_for('admin_login'))
+
+# ==================== ADMIN DASHBOARD ====================
+
+@app.route('/admin')
+@app.route('/admin/dashboard')
+@admin_required
+def admin_dashboard():
+    # Get statistics
+    total_users = User.objects.count()
+    total_links = ShortenedURL.objects.count()
+    total_clicks = Click.objects.count()
+    total_earnings = sum(User.objects.scalar('total_earnings'))
+    pending_withdrawals = Withdrawal.objects(status='pending').count()
+    total_withdrawn = sum(Withdrawal.objects(status='approved').scalar('amount')) or 0
+    
+    # Recent users
+    recent_users = User.objects.order_by('-created_at').limit(5)
+    
+    # Recent links
+    recent_links = ShortenedURL.objects.order_by('-created_at').limit(5)
+    
+    # Pending withdrawals
+    pending = Withdrawal.objects(status='pending').limit(10)
+    
+    # Chart data - clicks per day (last 7 days)
+    seven_days_ago = datetime.utcnow() - timedelta(days=7)
+    clicks_data = {}
+    
+    for i in range(7):
+        date = (datetime.utcnow() - timedelta(days=i)).date()
+        clicks = Click.objects(clicked_at__gte=date).count()
+        clicks_data[str(date)] = clicks
+    
+    return render_template('admin/dashboard.html',
+                         total_users=total_users,
+                         total_links=total_links,
+                         total_clicks=total_clicks,
+                         total_earnings=round(total_earnings, 2),
+                         pending_withdrawals=pending_withdrawals,
+                         total_withdrawn=round(total_withdrawn, 2),
+                         recent_users=recent_users,
+                         recent_links=recent_links,
+                         pending_withdrawals_list=pending,
+                         clicks_data=clicks_data)
+
+# ==================== USER MANAGEMENT ====================
+
+@app.route('/admin/users')
+@admin_required
+def admin_users():
+    page = request.args.get('page', 1, type=int)
+    search = request.args.get('search', '')
+    
+    if search:
+        users = User.objects(username__icontains=search).order_by('-created_at').paginate(page=page, per_page=20)
+    else:
+        users = User.objects.order_by('-created_at').paginate(page=page, per_page=20)
+    
+    return render_template('admin/users.html', users=users.items, page=page, total=users.total)
+
+@app.route('/admin/user/<user_id>')
+@admin_required
+def admin_user_detail(user_id):
+    try:
+        from bson.objectid import ObjectId
+        user = User.objects(id=ObjectId(user_id)).first()
+    except:
+        return redirect(url_for('admin_users'))
+    
+    if not user:
+        return redirect(url_for('admin_users'))
+    
+    urls = ShortenedURL.objects(user=user)
+    withdrawals = Withdrawal.objects(user=user)
+    
+    return render_template('admin/user_detail.html',
+                         user=user,
+                         urls=urls,
+                         withdrawals=withdrawals)
+
+@app.route('/admin/api/user/<user_id>/ban', methods=['POST'])
+@admin_required
+def ban_user(user_id):
+    try:
+        from bson.objectid import ObjectId
+        user = User.objects(id=ObjectId(user_id)).first()
+    except:
+        return jsonify({'error': 'User not found'}), 404
+    
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+    
+    user.is_banned = True
+    user.save()
+    
+    return jsonify({'success': True, 'message': 'User banned'})
+
+@app.route('/admin/api/user/<user_id>/unban', methods=['POST'])
+@admin_required
+def unban_user(user_id):
+    try:
+        from bson.objectid import ObjectId
+        user = User.objects(id=ObjectId(user_id)).first()
+    except:
+        return jsonify({'error': 'User not found'}), 404
+    
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+    
+    user.is_banned = False
+    user.save()
+    
+    return jsonify({'success': True, 'message': 'User unbanned'})
+
+@app.route('/admin/api/user/<user_id>/delete', methods=['DELETE'])
+@admin_required
+def admin_delete_user(user_id):
+    try:
+        from bson.objectid import ObjectId
+        user = User.objects(id=ObjectId(user_id)).first()
+    except:
+        return jsonify({'error': 'User not found'}), 404
+    
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+    
+    # Delete all user data
+    ShortenedURL.objects(user=user).delete()
+    Click.objects(url__in=ShortenedURL.objects(user=user)).delete()
+    Withdrawal.objects(user=user).delete()
+    user.delete()
+    
+    return jsonify({'success': True, 'message': 'User deleted'})
+
+# ==================== LINK MANAGEMENT ====================
+
+@app.route('/admin/links')
+@admin_required
+def admin_links():
+    page = request.args.get('page', 1, type=int)
+    search = request.args.get('search', '')
+    
+    if search:
+        links = ShortenedURL.objects(short_code__icontains=search).order_by('-created_at').paginate(page=page, per_page=20)
+    else:
+        links = ShortenedURL.objects.order_by('-created_at').paginate(page=page, per_page=20)
+    
+    return render_template('admin/links.html', links=links.items, page=page, total=links.total)
+
+@app.route('/admin/api/link/<link_id>/delete', methods=['DELETE'])
+@admin_required
+def admin_delete_link(link_id):
+    try:
+        from bson.objectid import ObjectId
+        link = ShortenedURL.objects(id=ObjectId(link_id)).first()
+    except:
+        return jsonify({'error': 'Link not found'}), 404
+    
+    if not link:
+        return jsonify({'error': 'Link not found'}), 404
+    
+    # Delete clicks
+    Click.objects(url=link).delete()
+    link.delete()
+    
+    return jsonify({'success': True, 'message': 'Link deleted'})
+
+@app.route('/admin/api/link/<link_id>/disable', methods=['POST'])
+@admin_required
+def admin_disable_link(link_id):
+    try:
+        from bson.objectid import ObjectId
+        link = ShortenedURL.objects(id=ObjectId(link_id)).first()
+    except:
+        return jsonify({'error': 'Link not found'}), 404
+    
+    if not link:
+        return jsonify({'error': 'Link not found'}), 404
+    
+    link.is_active = False
+    link.save()
+    
+    return jsonify({'success': True, 'message': 'Link disabled'})
+
+# ==================== WITHDRAWAL MANAGEMENT ====================
+
+@app.route('/admin/withdrawals')
+@admin_required
+def admin_withdrawals():
+    status = request.args.get('status', 'pending')
+    
+    withdrawals = Withdrawal.objects(status=status).order_by('-requested_at')
+    
+    return render_template('admin/withdrawals.html',
+                         withdrawals=withdrawals,
+                         status=status)
+
+@app.route('/admin/api/withdrawal/<withdrawal_id>/approve', methods=['POST'])
+@admin_required
+def approve_withdrawal(withdrawal_id):
+    try:
+        from bson.objectid import ObjectId
+        withdrawal = Withdrawal.objects(id=ObjectId(withdrawal_id)).first()
+    except:
+        return jsonify({'error': 'Withdrawal not found'}), 404
+    
+    if not withdrawal:
+        return jsonify({'error': 'Withdrawal not found'}), 404
+    
+    withdrawal.status = 'approved'
+    withdrawal.processed_at = datetime.utcnow()
+    withdrawal.save()
+    
+    user = withdrawal.user
+    user.withdrawn += withdrawal.amount
+    user.save()
+    
+    return jsonify({'success': True, 'message': 'Withdrawal approved'})
+
+@app.route('/admin/api/withdrawal/<withdrawal_id>/reject', methods=['POST'])
+@admin_required
+def reject_withdrawal(withdrawal_id):
+    try:
+        from bson.objectid import ObjectId
+        withdrawal = Withdrawal.objects(id=ObjectId(withdrawal_id)).first()
+    except:
+        return jsonify({'error': 'Withdrawal not found'}), 404
+    
+    if not withdrawal:
+        return jsonify({'error': 'Withdrawal not found'}), 404
+    
+    withdrawal.status = 'rejected'
+    withdrawal.processed_at = datetime.utcnow()
+    withdrawal.save()
+    
+    # Refund balance
+    user = withdrawal.user
+    user.balance += withdrawal.amount
+    user.save()
+    
+    return jsonify({'success': True, 'message': 'Withdrawal rejected and balance refunded'})
+
+# ==================== AD RATES MANAGEMENT ====================
+
+@app.route('/admin/ad-rates')
+@admin_required
+def admin_ad_rates():
+    rates = AdRate.objects.order_by('-updated_at')
+    
+    return render_template('admin/ad_rates.html', rates=rates)
+
+@app.route('/admin/api/rate/<rate_id>/update', methods=['POST'])
+@admin_required
+def update_ad_rate(rate_id):
+    try:
+        from bson.objectid import ObjectId
+        rate = AdRate.objects(id=ObjectId(rate_id)).first()
+    except:
+        return jsonify({'error': 'Rate not found'}), 404
+    
+    data = request.get_json()
+    
+    if not rate:
+        return jsonify({'error': 'Rate not found'}), 404
+    
+    rate.rate = float(data.get('rate', rate.rate))
+    rate.updated_at = datetime.utcnow()
+    rate.save()
+    
+    return jsonify({'success': True, 'message': 'Rate updated'})
+
+# ==================== REPORTS & ANALYTICS ====================
+
+@app.route('/admin/reports')
+@admin_required
+def admin_reports():
+    # User registration trend (last 30 days)
+    thirty_days_ago = datetime.utcnow() - timedelta(days=30)
+    user_registrations = {}
+    
+    for i in range(30):
+        date = (datetime.utcnow() - timedelta(days=i)).date()
+        count = User.objects(created_at__gte=datetime.combine(date, datetime.min.time())).count()
+        user_registrations[str(date)] = count
+    
+    # Revenue data
+    total_platform_revenue = sum(User.objects.scalar('total_earnings')) or 0
+    total_user_paid = sum(User.objects.scalar('withdrawn')) or 0
+    platform_commission = total_platform_revenue - total_user_paid
+    
+    # Top users by earnings
+    top_users = User.objects.order_by('-total_earnings').limit(10)
+    
+    # Top links by clicks
+    top_links = ShortenedURL.objects.order_by('-clicks').limit(10)
+    
+    return render_template('admin/reports.html',
+                         user_registrations=user_registrations,
+                         total_platform_revenue=round(total_platform_revenue, 2),
+                         total_user_paid=round(total_user_paid, 2),
+                         platform_commission=round(platform_commission, 2),
+                         top_users=top_users,
+                         top_links=top_links)
+
+# ==================== ADMIN SETTINGS ====================
+
+@app.route('/admin/settings')
+@admin_required
+def admin_settings():
+    admin = AdminUser.objects(id=session['admin_id']).first()
+    admins = AdminUser.objects.all()
+    
+    return render_template('admin/settings.html',
+                         admin=admin,
+                         admins=admins)
+
+@app.route('/admin/api/admin/<admin_id>/delete', methods=['DELETE'])
+@admin_required
+def delete_admin(admin_id):
+    try:
+        from bson.objectid import ObjectId
+        admin_to_delete = AdminUser.objects(id=ObjectId(admin_id)).first()
+    except:
+        return jsonify({'error': 'Admin not found'}), 404
+    
+    if not admin_to_delete:
+        return jsonify({'error': 'Admin not found'}), 404
+    
+    # Don't allow deleting yourself
+    if str(admin_to_delete.id) == session.get('admin_id'):
+        return jsonify({'error': 'Cannot delete yourself'}), 403
+    
+    admin_to_delete.delete()
+    
+    return jsonify({'success': True, 'message': 'Admin deleted'})
+
+@app.route('/admin/api/admin/<admin_id>/toggle', methods=['POST'])
+@admin_required
+def toggle_admin_status(admin_id):
+    try:
+        from bson.objectid import ObjectId
+        admin_user = AdminUser.objects(id=ObjectId(admin_id)).first()
+    except:
+        return jsonify({'error': 'Admin not found'}), 404
+    
+    if not admin_user:
+        return jsonify({'error': 'Admin not found'}), 404
+    
+    admin_user.is_active = not admin_user.is_active
+    admin_user.save()
+    
+    return jsonify({'success': True, 'is_active': admin_user.is_active})
+
+# ==================== SUPPORT TICKETS ====================
+
+class SupportTicket(Document):
+    user = ReferenceField(User)
+    subject = StringField(required=True)
+    message = StringField(required=True)
+    status = StringField(default='open')  # open, in_progress, closed
+    created_at = DateTimeField(default=datetime.utcnow)
+    replies = ListField(DictField())
+    
+    meta = {
+        'collection': 'support_tickets',
+        'indexes': ['user', 'status', 'created_at']
+    }
+
+@app.route('/admin/support')
+@admin_required
+def admin_support():
+    status = request.args.get('status', 'open')
+    
+    tickets = SupportTicket.objects(status=status).order_by('-created_at')
+    
+    return render_template('admin/support.html',
+                         tickets=tickets,
+                         status=status)
+
+@app.route('/admin/support/<ticket_id>')
+@admin_required
+def admin_support_detail(ticket_id):
+    try:
+        from bson.objectid import ObjectId
+        ticket = SupportTicket.objects(id=ObjectId(ticket_id)).first()
+    except:
+        return redirect(url_for('admin_support'))
+    
+    if not ticket:
+        return redirect(url_for('admin_support'))
+    
+    return render_template('admin/support_detail.html', ticket=ticket)
+
+@app.route('/admin/api/support/<ticket_id>/reply', methods=['POST'])
+@admin_required
+def support_reply(ticket_id):
+    try:
+        from bson.objectid import ObjectId
+        ticket = SupportTicket.objects(id=ObjectId(ticket_id)).first()
+    except:
+        return jsonify({'error': 'Ticket not found'}), 404
+    
+    data = request.get_json()
+    admin = AdminUser.objects(id=session['admin_id']).first()
+    
+    if not ticket:
+        return jsonify({'error': 'Ticket not found'}), 404
+    
+    reply = {
+        'from': 'admin',
+        'admin_name': admin.username,
+        'message': data.get('message'),
+        'created_at': datetime.utcnow().isoformat()
+    }
+    
+    if not ticket.replies:
+        ticket.replies = []
+    
+    ticket.replies.append(reply)
+    ticket.status = 'in_progress'
+    ticket.save()
+    
+    return jsonify({'success': True, 'message': 'Reply sent'})
+
+@app.route('/admin/api/support/<ticket_id>/close', methods=['POST'])
+@admin_required
+def close_support_ticket(ticket_id):
+    try:
+        from bson.objectid import ObjectId
+        ticket = SupportTicket.objects(id=ObjectId(ticket_id)).first()
+    except:
+        return jsonify({'error': 'Ticket not found'}), 404
+    
+    if not ticket:
+        return jsonify({'error': 'Ticket not found'}), 404
+    
+    ticket.status = 'closed'
+    ticket.save()
+    
+    return jsonify({'success': True, 'message': 'Ticket closed'})
+
 
 # ==================== ERROR HANDLERS ====================
 
