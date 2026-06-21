@@ -1,0 +1,87 @@
+{% extends "admin/base.html" %}
+
+{% block page_title %}Links Management{% endblock %}
+
+{% block content %}
+<style>
+    .search-bar {
+        margin-bottom: 20px;
+        display: flex;
+        gap: 10px;
+    }
+
+    .search-bar input {
+        flex: 1;
+        padding: 10px 15px;
+        border: 1px solid #e2e8f0;
+        border-radius: 5px;
+    }
+
+    .search-bar button {
+        background: #667eea;
+        color: white;
+        border: none;
+        padding: 10px 20px;
+        border-radius: 5px;
+        cursor: pointer;
+    }
+</style>
+
+<!-- Search Bar -->
+<form method="GET" class="search-bar">
+    <input type="text" name="search" placeholder="Search links by short code..." value="{{ request.args.get('search', '') }}">
+    <button type="submit">Search</button>
+</form>
+
+<!-- Links Table -->
+<div class="admin-table">
+    <table>
+        <thead>
+            <tr>
+                <th>Short Code</th>
+                <th>Original URL</th>
+                <th>User</th>
+                <th>Clicks</th>
+                <th>Earnings</th>
+                <th>Created</th>
+                <th>Status</th>
+                <th>Action</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for link in links %}
+            <tr>
+                <td><code>{{ link.short_code }}</code></td>
+                <td><small>{{ link.original_url[:50] }}...</small></td>
+                <td>{{ link.user.username }}</td>
+                <td>{{ link.clicks }}</td>
+                <td>${{ "%.2f"|format(link.earnings) }}</td>
+                <td>{{ link.created_at.strftime('%Y-%m-%d') }}</td>
+                <td>
+                    {% if link.is_active %}
+                    <span class="badge badge-success">Active</span>
+                    {% else %}
+                    <span class="badge badge-danger">Disabled</span>
+                    {% endif %}
+                </td>
+                <td>
+                    <button class="btn-small btn-danger" onclick="deleteLink('{{ link.id }}')">Delete</button>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<script>
+    function deleteLink(linkId) {
+        if (confirm('Delete this link permanently?')) {
+            fetch(`/admin/api/link/${linkId}/delete`, { method: 'DELETE' })
+                .then(r => r.json())
+                .then(d => {
+                    if (d.success) location.reload();
+                });
+        }
+    }
+</script>
+{% endblock %}
