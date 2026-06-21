@@ -1,5 +1,5 @@
 from flask import Flask, render_template, request, jsonify, redirect, session, url_for
-from flask_sqlalchemy import SQLAlchemy
+from mongoengine import connect, Document, StringField, IntField, FloatField, DateTimeField, BooleanField, ReferenceField, ListField, DictField
 from werkzeug.security import generate_password_hash, check_password_hash
 from functools import wraps
 import secrets
@@ -8,38 +8,49 @@ import qrcode
 import io
 import base64
 from datetime import datetime, timedelta
-from sqlalchemy import func
+import requests
 import os
 from dotenv import load_dotenv
+from apscheduler.schedulers.background import BackgroundScheduler
+import atexit
+import json
 
 load_dotenv()
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'shortzlinks-dev-key-change-in-production')
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('SQLALCHEMY_DATABASE_URI', 'sqlite:///shortzlinks.db')
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['MONGODB_URI'] = os.environ.get('MONGODB_URI', 'mongodb://localhost:27017/shortzlinks')
 
-db = SQLAlchemy(app)
+# Connect to MongoDB
+try:
+    connect(host=os.environ.get('MONGODB_URI', 'mongodb://localhost:27017/shortzlinks'))
+    print("✅ Connected to MongoDB!")
+except Exception as e:
+    print(f"❌ MongoDB Connection Error: {e}")
 
-# ==================== DATABASE MODELS ====================
+# ==================== DATABASE MODELS (MongoDB) ====================
 
-class User(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    username = db.Column(db.String(80), unique=True, nullable=False)
-    email = db.Column(db.String(120), unique=True, nullable=False)
-    password = db.Column(db.String(200), nullable=False)
-    brand_name = db.Column(db.String(120), default='Shortzlinks')
-    domain = db.Column(db.String(120), default='short.link')
-    balance = db.Column(db.Float, default=0.0)
-    withdrawn = db.Column(db.Float, default=0.0)
-    referral_code = db.Column(db.String(20), unique=True)
-    referred_by = db.Column(db.Integer, db.ForeignKey('user.id'))
-    total_views = db.Column(db.Integer, default=0)
-    total_earnings = db.Column(db.Float, default=0.0)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+class User(Document):
+    username = StringField(unique=True, required=True)
+    email = StringField(unique=True, required=True)
+    password = StringField(required=True)
+    api_key = StringField(unique=True)
+    brand_name = StringField(default='Shortzlinks')
+    domain = StringField(default='short.link')
+    balance = FloatField(default=0.0)
+    withdrawn = FloatField(default=0.0)
+    referral_code = StringField(unique=True)
+    referred_by = ReferenceField('self', null=True)
+    total_views = IntField(default=0)
+    total_earnings = FloatField(default=0.0)
+    commission_rate = FloatField(default=25.0)  # 25% commission
+    created_at = DateTimeField(default=datetime.utcnow)
+    updated_at = DateTimeField(default=datetime.utcnow)
     
-    urls = db.relationship('ShortenedURL', backref='user', lazy=True, cascade='all, delete-orphan')
-    referrals = db.relationship('User', remote_side=[referred_by], backref='referrer')
+    meta = {
+        'collection': 'users',
+        'indexes': ['username', 'email', 'api_key']
+    }
 
     def set_password(self, password):
         self.password = generate_password_hash(password)
@@ -47,37 +58,134 @@ class User(db.Model):
     def check_password(self, password):
         return check_password_hash(self.password, password)
 
-class ShortenedURL(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    short_code = db.Column(db.String(10), unique=True, nullable=False)
-    original_url = db.Column(db.String(2000), nullable=False)
-    custom_alias = db.Column(db.String(120))
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    clicks = db.Column(db.Integer, default=0)
-    earnings = db.Column(db.Float, default=0.0)
-    cpm = db.Column(db.Float, default=5.0)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    expires_at = db.Column(db.DateTime, nullable=True)
-    is_active = db.Column(db.Boolean, default=True)
-    clicks_data = db.relationship('Click', backref='url', lazy=True, cascade='all, delete-orphan')
+    def generate_api_key(self):
+        self.api_key = secrets.token_urlsafe(32)
+        return self.api_key
 
-class Click(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    url_id = db.Column(db.Integer, db.ForeignKey('shortened_url.id'), nullable=False)
-    clicked_at = db.Column(db.DateTime, default=datetime.utcnow)
-    ip_address = db.Column(db.String(45))
-    user_agent = db.Column(db.String(500))
-    referrer = db.Column(db.String(500))
-    country = db.Column(db.String(2), default='US')
+class ShortenedURL(Document):
+    short_code = StringField(unique=True, required=True)
+    original_url = StringField(required=True)
+    custom_alias = StringField(null=True)
+    user = ReferenceField(User, required=True)
+    clicks = IntField(default=0)
+    earnings = FloatField(default=0.0)
+    cpm_rate = FloatField(default=5.0)
+    country_earnings = DictField()  # {'US': 5.0, 'IN': 0.5, ...}
+    created_at = DateTimeField(default=datetime.utcnow)
+    expires_at = DateTimeField(null=True)
+    is_active = BooleanField(default=True)
+    
+    meta = {
+        'collection': 'shortened_urls',
+        'indexes': ['short_code', 'user', 'created_at']
+    }
 
-class Withdrawal(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    amount = db.Column(db.Float, nullable=False)
-    status = db.Column(db.String(20), default='pending')
-    method = db.Column(db.String(50))
-    requested_at = db.Column(db.DateTime, default=datetime.utcnow)
-    processed_at = db.Column(db.DateTime, nullable=True)
+class Click(Document):
+    url = ReferenceField(ShortenedURL, required=True)
+    clicked_at = DateTimeField(default=datetime.utcnow)
+    ip_address = StringField()
+    user_agent = StringField()
+    referrer = StringField()
+    country_code = StringField(default='US')
+    country_name = StringField(default='United States')
+    earnings = FloatField(default=0.0)
+    
+    meta = {
+        'collection': 'clicks',
+        'indexes': ['url', 'country_code', 'clicked_at']
+    }
+
+class Withdrawal(Document):
+    user = ReferenceField(User, required=True)
+    amount = FloatField(required=True)
+    status = StringField(default='pending')  # pending, approved, rejected
+    method = StringField()  # paypal, bank, stripe, crypto
+    requested_at = DateTimeField(default=datetime.utcnow)
+    processed_at = DateTimeField(null=True)
+    
+    meta = {
+        'collection': 'withdrawals',
+        'indexes': ['user', 'status']
+    }
+
+class AdRate(Document):
+    country_code = StringField(unique=True, required=True)
+    country_name = StringField()
+    rate = FloatField()  # CPM rate
+    network = StringField()  # adsterra, monetag, etc
+    updated_at = DateTimeField(default=datetime.utcnow)
+    
+    meta = {
+        'collection': 'ad_rates',
+        'indexes': ['country_code']
+    }
+
+# ==================== AD NETWORK INTEGRATION ====================
+
+def fetch_adsterra_rates():
+    """Fetch CPM rates from Adsterra"""
+    try:
+        response = requests.get('https://api.adsterra.com/rates', timeout=10)
+        if response.status_code == 200:
+            rates = response.json()
+            for country_code, rate in rates.items():
+                AdRate.objects(country_code=country_code).update_one(
+                    set__rate=rate,
+                    set__network='adsterra',
+                    set__updated_at=datetime.utcnow(),
+                    upsert=True
+                )
+            print("✅ Adsterra rates updated")
+            return True
+    except Exception as e:
+        print(f"❌ Adsterra Error: {e}")
+    return False
+
+def fetch_monetag_rates():
+    """Fetch CPM rates from Monetag"""
+    try:
+        response = requests.get('https://api.monetag.com/rates', timeout=10)
+        if response.status_code == 200:
+            rates = response.json()
+            for country_code, rate in rates.items():
+                AdRate.objects(country_code=country_code).update_one(
+                    set__rate=rate,
+                    set__network='monetag',
+                    set__updated_at=datetime.utcnow(),
+                    upsert=True
+                )
+            print("✅ Monetag rates updated")
+            return True
+    except Exception as e:
+        print(f"❌ Monetag Error: {e}")
+    return False
+
+def update_ad_rates():
+    """Auto-update ad rates from networks"""
+    print("🔄 Updating ad rates...")
+    fetch_adsterra_rates()
+    fetch_monetag_rates()
+
+def get_country_cpm_rate(country_code='US'):
+    """Get CPM rate for specific country"""
+    ad_rate = AdRate.objects(country_code=country_code).first()
+    return ad_rate.rate if ad_rate else 5.0  # Default $5 CPM
+
+# ==================== SCHEDULER ====================
+
+scheduler = BackgroundScheduler()
+scheduler.add_job(
+    func=update_ad_rates,
+    trigger="cron",
+    hour=0,
+    minute=0,
+    id='update_ad_rates',
+    name='Update ad rates daily',
+    replace_existing=True
+)
+scheduler.start()
+
+atexit.register(lambda: scheduler.shutdown())
 
 # ==================== HELPER FUNCTIONS ====================
 
@@ -100,10 +208,19 @@ def generate_qr_code(url):
     return base64.b64encode(buf.getvalue()).decode()
 
 def get_country_from_ip(ip):
-    return 'US'
+    """Get country code from IP using free API"""
+    try:
+        response = requests.get(f'https://ipapi.co/{ip}/json/', timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            return data.get('country_code', 'US'), data.get('country_name', 'United States')
+    except:
+        pass
+    return 'US', 'United States'
 
-def calculate_earnings(clicks, cpm=5.0):
-    return (clicks / 1000) * cpm
+def calculate_user_earnings(base_cpm, user_commission=25):
+    """Calculate user earnings after commission"""
+    return base_cpm * (1 - user_commission / 100)
 
 def login_required(f):
     @wraps(f)
@@ -113,7 +230,22 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
-# ==================== AUTHENTICATION ==================== 
+def api_key_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        api_key = request.headers.get('X-API-Key')
+        if not api_key:
+            return jsonify({'error': 'API key required'}), 401
+        
+        user = User.objects(api_key=api_key).first()
+        if not user:
+            return jsonify({'error': 'Invalid API key'}), 401
+        
+        request.user = user
+        return f(*args, **kwargs)
+    return decorated_function
+
+# ==================== AUTHENTICATION ROUTES ====================
 
 @app.route('/register', methods=['GET', 'POST'])
 def register():
@@ -126,17 +258,20 @@ def register():
         if not username or not email or not password:
             return jsonify({'error': 'All fields required'}), 400
         
-        if User.query.filter_by(username=username).first():
+        if User.objects(username=username):
             return jsonify({'error': 'Username already exists'}), 400
         
-        if User.query.filter_by(email=email).first():
+        if User.objects(email=email):
             return jsonify({'error': 'Email already exists'}), 400
         
-        user = User(username=username, email=email, referral_code=generate_referral_code())
+        user = User(
+            username=username,
+            email=email,
+            referral_code=generate_referral_code()
+        )
         user.set_password(password)
-        
-        db.session.add(user)
-        db.session.commit()
+        user.generate_api_key()
+        user.save()
         
         return jsonify({'success': 'Registration successful'}), 201
     
@@ -149,12 +284,12 @@ def login():
         username = data.get('username')
         password = data.get('password')
         
-        user = User.query.filter_by(username=username).first()
+        user = User.objects(username=username).first()
         
         if not user or not user.check_password(password):
             return jsonify({'error': 'Invalid credentials'}), 401
         
-        session['user_id'] = user.id
+        session['user_id'] = str(user.id)
         session['username'] = user.username
         
         return jsonify({'success': 'Login successful'}), 200
@@ -177,65 +312,97 @@ def index():
 @app.route('/dashboard')
 @login_required
 def dashboard():
-    user = User.query.get(session['user_id'])
-    urls = ShortenedURL.query.filter_by(user_id=session['user_id']).all()
+    user = User.objects(id=session['user_id']).first()
+    urls = ShortenedURL.objects(user=user).all()
     
     total_clicks = sum(url.clicks for url in urls)
     total_earnings = sum(url.earnings for url in urls)
     avg_cpm = total_earnings / (total_clicks / 1000) if total_clicks > 0 else 0
     
     today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
-    today_clicks = db.session.query(func.count(Click.id)).filter(
-        Click.clicked_at >= today_start,
-        Click.url_id.in_([u.id for u in urls])
-    ).scalar() or 0
-    today_earnings = calculate_earnings(today_clicks, 5.0)
+    today_clicks = Click.objects(url__in=urls, clicked_at__gte=today_start).count()
+    today_earnings = sum(Click.objects(url__in=urls, clicked_at__gte=today_start).scalar('earnings'))
     
     month_start = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    month_clicks = db.session.query(func.count(Click.id)).filter(
-        Click.clicked_at >= month_start,
-        Click.url_id.in_([u.id for u in urls])
-    ).scalar() or 0
-    month_earnings = calculate_earnings(month_clicks, 5.0)
+    month_clicks = Click.objects(url__in=urls, clicked_at__gte=month_start).count()
+    month_earnings = sum(Click.objects(url__in=urls, clicked_at__gte=month_start).scalar('earnings'))
     
     return render_template('dashboard_enhanced.html',
                          user=user,
                          urls=urls,
                          total_clicks=total_clicks,
-                         total_earnings=total_earnings,
+                         total_earnings=round(total_earnings, 2),
                          avg_cpm=round(avg_cpm, 4),
                          total_links=len(urls),
                          today_clicks=today_clicks,
-                         today_earnings=today_earnings,
+                         today_earnings=round(today_earnings, 2),
                          month_clicks=month_clicks,
-                         month_earnings=month_earnings)
+                         month_earnings=round(month_earnings, 2))
 
 @app.route('/manage-links')
 @login_required
 def manage_links():
-    user = User.query.get(session['user_id'])
-    urls = ShortenedURL.query.filter_by(user_id=session['user_id']).order_by(ShortenedURL.created_at.desc()).all()
+    user = User.objects(id=session['user_id']).first()
+    urls = ShortenedURL.objects(user=user).order_by('-created_at').all()
     return render_template('manage_links.html', user=user, urls=urls)
 
 @app.route('/referrals')
 @login_required
 def referrals():
-    user = User.query.get(session['user_id'])
-    refs = User.query.filter_by(referred_by=user.id).all()
+    user = User.objects(id=session['user_id']).first()
+    refs = User.objects(referred_by=user).all()
     return render_template('referrals_page.html', user=user, referrals=refs)
 
 @app.route('/withdrawal')
 @login_required
 def withdrawal():
-    user = User.query.get(session['user_id'])
-    withdrawals = Withdrawal.query.filter_by(user_id=user.id).order_by(Withdrawal.requested_at.desc()).all()
+    user = User.objects(id=session['user_id']).first()
+    withdrawals = Withdrawal.objects(user=user).order_by('-requested_at').all()
     return render_template('withdrawal_page.html', user=user, withdrawals=withdrawals, min_withdrawal=5.0)
 
 @app.route('/settings')
 @login_required
 def settings():
-    user = User.query.get(session['user_id'])
+    user = User.objects(id=session['user_id']).first()
     return render_template('settings.html', user=user)
+
+@app.route('/analytics')
+@login_required
+def analytics():
+    user = User.objects(id=session['user_id']).first()
+    urls = ShortenedURL.objects(user=user).all()
+    
+    # Country-wise stats
+    country_stats = {}
+    for url in urls:
+        clicks = Click.objects(url=url).all()
+        for click in clicks:
+            country = click.country_code
+            if country not in country_stats:
+                country_stats[country] = {
+                    'clicks': 0,
+                    'earnings': 0.0,
+                    'name': click.country_name
+                }
+            country_stats[country]['clicks'] += 1
+            country_stats[country]['earnings'] += click.earnings
+    
+    return render_template('analytics.html', user=user, country_stats=country_stats)
+
+# ==================== AD WAIT PAGE ====================
+
+@app.route('/ad/<short_code>')
+def ad_wait_page(short_code):
+    """Show ad wait page before redirect"""
+    shortened = ShortenedURL.objects(short_code=short_code).first()
+    
+    if not shortened or not shortened.is_active:
+        return render_template('404.html'), 404
+    
+    if shortened.expires_at and datetime.utcnow() > shortened.expires_at:
+        return render_template('404.html'), 404
+    
+    return render_template('ad_wait.html', short_code=short_code, title=shortened.original_url[:50])
 
 # ==================== API ROUTES ====================
 
@@ -253,27 +420,27 @@ def shorten_url():
         original_url = 'https://' + original_url
     
     if custom_alias:
-        if ShortenedURL.query.filter_by(custom_alias=custom_alias).first():
+        if ShortenedURL.objects(custom_alias=custom_alias):
             return jsonify({'error': 'Custom alias already taken'}), 400
         short_code = custom_alias
     else:
         while True:
             short_code = generate_short_code()
-            if not ShortenedURL.query.filter_by(short_code=short_code).first():
+            if not ShortenedURL.objects(short_code=short_code):
                 break
+    
+    user = User.objects(id=session['user_id']).first()
     
     shortened = ShortenedURL(
         short_code=short_code,
         original_url=original_url,
         custom_alias=custom_alias,
-        user_id=session['user_id'],
-        cpm=5.0
+        user=user,
+        cpm_rate=5.0
     )
+    shortened.save()
     
-    db.session.add(shortened)
-    db.session.commit()
-    
-    short_url = request.host_url.rstrip('/') + '/' + short_code
+    short_url = request.host_url.rstrip('/') + 'ad/' + short_code
     qr_code = generate_qr_code(short_url)
     
     return jsonify({
@@ -287,9 +454,10 @@ def shorten_url():
 @app.route('/api/urls')
 @login_required
 def get_urls():
-    urls = ShortenedURL.query.filter_by(user_id=session['user_id']).all()
+    user = User.objects(id=session['user_id']).first()
+    urls = ShortenedURL.objects(user=user).all()
     return jsonify([{
-        'id': url.id,
+        'id': str(url.id),
         'short_code': url.short_code,
         'original_url': url.original_url,
         'clicks': url.clicks,
@@ -298,57 +466,71 @@ def get_urls():
         'is_active': url.is_active
     } for url in urls])
 
-@app.route('/api/url/<int:url_id>/stats')
+@app.route('/api/url/<url_id>/stats')
 @login_required
 def get_url_stats(url_id):
-    shortened = ShortenedURL.query.get(url_id)
+    try:
+        from bson.objectid import ObjectId
+        shortened = ShortenedURL.objects(id=ObjectId(url_id)).first()
+    except:
+        return jsonify({'error': 'Invalid URL ID'}), 400
     
-    if not shortened or shortened.user_id != session['user_id']:
+    user = User.objects(id=session['user_id']).first()
+    if not shortened or shortened.user != user:
         return jsonify({'error': 'Not found'}), 404
     
     seven_days_ago = datetime.utcnow() - timedelta(days=7)
-    clicks_per_day = db.session.query(
-        func.date(Click.clicked_at).label('date'),
-        func.count(Click.id).label('count')
-    ).filter(
-        Click.url_id == url_id,
-        Click.clicked_at >= seven_days_ago
-    ).group_by(func.date(Click.clicked_at)).all()
+    clicks = Click.objects(url=shortened, clicked_at__gte=seven_days_ago).all()
+    
+    clicks_per_day = {}
+    for click in clicks:
+        date_key = click.clicked_at.strftime('%Y-%m-%d')
+        if date_key not in clicks_per_day:
+            clicks_per_day[date_key] = 0
+        clicks_per_day[date_key] += 1
     
     return jsonify({
-        'id': shortened.id,
+        'id': str(shortened.id),
         'short_code': shortened.short_code,
         'original_url': shortened.original_url,
         'clicks': shortened.clicks,
         'earnings': round(shortened.earnings, 4),
-        'cpm': shortened.cpm,
+        'cpm': shortened.cpm_rate,
         'created_at': shortened.created_at.strftime('%Y-%m-%d'),
-        'clicks_per_day': [{'date': str(d[0]), 'count': d[1]} for d in clicks_per_day]
+        'clicks_per_day': [{'date': date, 'count': count} for date, count in clicks_per_day.items()]
     })
 
-@app.route('/api/url/<int:url_id>/delete', methods=['DELETE'])
+@app.route('/api/url/<url_id>/delete', methods=['DELETE'])
 @login_required
 def delete_url(url_id):
-    shortened = ShortenedURL.query.get(url_id)
+    try:
+        from bson.objectid import ObjectId
+        shortened = ShortenedURL.objects(id=ObjectId(url_id)).first()
+    except:
+        return jsonify({'error': 'Invalid URL ID'}), 400
     
-    if not shortened or shortened.user_id != session['user_id']:
+    user = User.objects(id=session['user_id']).first()
+    if not shortened or shortened.user != user:
         return jsonify({'error': 'Not found'}), 404
     
-    db.session.delete(shortened)
-    db.session.commit()
-    
+    shortened.delete()
     return jsonify({'success': True})
 
-@app.route('/api/url/<int:url_id>/toggle', methods=['POST'])
+@app.route('/api/url/<url_id>/toggle', methods=['POST'])
 @login_required
 def toggle_url(url_id):
-    shortened = ShortenedURL.query.get(url_id)
+    try:
+        from bson.objectid import ObjectId
+        shortened = ShortenedURL.objects(id=ObjectId(url_id)).first()
+    except:
+        return jsonify({'error': 'Invalid URL ID'}), 400
     
-    if not shortened or shortened.user_id != session['user_id']:
+    user = User.objects(id=session['user_id']).first()
+    if not shortened or shortened.user != user:
         return jsonify({'error': 'Not found'}), 404
     
     shortened.is_active = not shortened.is_active
-    db.session.commit()
+    shortened.save()
     
     return jsonify({'success': True, 'is_active': shortened.is_active})
 
@@ -359,7 +541,7 @@ def request_withdrawal():
     amount = data.get('amount')
     method = data.get('method')
     
-    user = User.query.get(session['user_id'])
+    user = User.objects(id=session['user_id']).first()
     
     if not amount or amount < 5.0:
         return jsonify({'error': 'Minimum withdrawal is $5'}), 400
@@ -368,16 +550,16 @@ def request_withdrawal():
         return jsonify({'error': 'Insufficient balance'}), 400
     
     withdrawal = Withdrawal(
-        user_id=user.id,
+        user=user,
         amount=amount,
         method=method,
         status='pending'
     )
+    withdrawal.save()
     
     user.balance -= amount
-    
-    db.session.add(withdrawal)
-    db.session.commit()
+    user.withdrawn += amount
+    user.save()
     
     return jsonify({'success': True, 'message': 'Withdrawal requested'})
 
@@ -385,22 +567,155 @@ def request_withdrawal():
 @login_required
 def update_settings():
     data = request.get_json()
-    user = User.query.get(session['user_id'])
+    user = User.objects(id=session['user_id']).first()
     
     if 'brand_name' in data:
         user.brand_name = data['brand_name']
     if 'domain' in data:
         user.domain = data['domain']
+    if 'commission_rate' in data:
+        user.commission_rate = float(data['commission_rate'])
     
-    db.session.commit()
+    user.updated_at = datetime.utcnow()
+    user.save()
     
     return jsonify({'success': True})
+
+# ==================== DEVELOPER TOOLS API ====================
+
+@app.route('/api/dev/stats', methods=['GET'])
+@api_key_required
+def dev_stats():
+    """Developer API - Get account stats"""
+    user = request.user
+    urls = ShortenedURL.objects(user=user).all()
+    
+    total_clicks = sum(url.clicks for url in urls)
+    total_earnings = sum(url.earnings for url in urls)
+    
+    return jsonify({
+        'username': user.username,
+        'total_links': len(urls),
+        'total_clicks': total_clicks,
+        'total_earnings': round(total_earnings, 2),
+        'balance': round(user.balance, 2),
+        'api_key': user.api_key[:10] + '****'
+    })
+
+@app.route('/api/dev/create', methods=['POST'])
+@api_key_required
+def dev_create_link():
+    """Developer API - Create shortened link"""
+    data = request.get_json()
+    url = data.get('url')
+    
+    if not url:
+        return jsonify({'error': 'URL required'}), 400
+    
+    if not url.startswith(('http://', 'https://')):
+        url = 'https://' + url
+    
+    while True:
+        short_code = generate_short_code()
+        if not ShortenedURL.objects(short_code=short_code):
+            break
+    
+    shortened = ShortenedURL(
+        short_code=short_code,
+        original_url=url,
+        user=request.user
+    )
+    shortened.save()
+    
+    short_url = request.host_url.rstrip('/') + 'ad/' + short_code
+    
+    return jsonify({
+        'success': True,
+        'short_code': short_code,
+        'short_url': short_url,
+        'original_url': url
+    }), 201
+
+@app.route('/api/dev/links', methods=['GET'])
+@api_key_required
+def dev_get_links():
+    """Developer API - Get all links"""
+    user = request.user
+    urls = ShortenedURL.objects(user=user).all()
+    
+    return jsonify({
+        'total': len(urls),
+        'links': [{
+            'short_code': url.short_code,
+            'original_url': url.original_url,
+            'clicks': url.clicks,
+            'earnings': round(url.earnings, 2),
+            'created_at': url.created_at.isoformat()
+        } for url in urls]
+    })
+
+@app.route('/api/dev/rates', methods=['GET'])
+def dev_get_rates():
+    """Get current CPM rates by country (Public API)"""
+    rates = AdRate.objects.all()
+    
+    return jsonify({
+        'total_countries': len(rates),
+        'rates': [{
+            'country_code': rate.country_code,
+            'country_name': rate.country_name,
+            'cpm': rate.rate,
+            'network': rate.network,
+            'updated_at': rate.updated_at.isoformat()
+        } for rate in rates]
+    })
+
+@app.route('/api/redirect/<short_code>')
+def api_redirect(short_code):
+    """API endpoint for redirecting"""
+    shortened = ShortenedURL.objects(short_code=short_code).first()
+    
+    if not shortened or not shortened.is_active:
+        return jsonify({'error': 'Not found'}), 404
+    
+    country_code, country_name = get_country_from_ip(request.remote_addr)
+    cpm_rate = get_country_cpm_rate(country_code)
+    
+    user = shortened.user
+    user_earnings = calculate_user_earnings(cpm_rate, user.commission_rate)
+    
+    click = Click(
+        url=shortened,
+        ip_address=request.remote_addr,
+        user_agent=request.user_agent.string,
+        referrer=request.referrer,
+        country_code=country_code,
+        country_name=country_name,
+        earnings=user_earnings / 1000
+    )
+    click.save()
+    
+    shortened.clicks += 1
+    shortened.earnings += (user_earnings / 1000)
+    shortened.save()
+    
+    user.total_views += 1
+    user.total_earnings += (user_earnings / 1000)
+    user.balance += (user_earnings / 1000)
+    user.save()
+    
+    return jsonify({
+        'success': True,
+        'redirect_url': shortened.original_url,
+        'earnings': round(user_earnings / 1000, 4)
+    })
 
 # ==================== REDIRECT ROUTE ====================
 
 @app.route('/<short_code>')
 def redirect_url(short_code):
-    shortened = ShortenedURL.query.filter_by(short_code=short_code).first()
+    """Show ad wait page then redirect"""
+    shortened = ShortenedURL.objects(short_code=short_code).first()
     
     if not shortened or not shortened.is_active:
         return render_template('404.html'), 404
@@ -408,26 +723,31 @@ def redirect_url(short_code):
     if shortened.expires_at and datetime.utcnow() > shortened.expires_at:
         return render_template('404.html'), 404
     
-    country = get_country_from_ip(request.remote_addr)
+    country_code, country_name = get_country_from_ip(request.remote_addr)
+    cpm_rate = get_country_cpm_rate(country_code)
+    
+    user = shortened.user
+    user_earnings = calculate_user_earnings(cpm_rate, user.commission_rate)
     
     click = Click(
-        url_id=shortened.id,
+        url=shortened,
         ip_address=request.remote_addr,
         user_agent=request.user_agent.string,
         referrer=request.referrer,
-        country=country
+        country_code=country_code,
+        country_name=country_name,
+        earnings=user_earnings / 1000
     )
+    click.save()
     
     shortened.clicks += 1
-    shortened.earnings = calculate_earnings(shortened.clicks, shortened.cpm)
+    shortened.earnings += (user_earnings / 1000)
+    shortened.save()
     
-    user = shortened.user
     user.total_views += 1
-    user.total_earnings += (shortened.cpm / 1000)
-    user.balance += (shortened.cpm / 1000)
-    
-    db.session.add(click)
-    db.session.commit()
+    user.total_earnings += (user_earnings / 1000)
+    user.balance += (user_earnings / 1000)
+    user.save()
     
     return redirect(shortened.original_url)
 
@@ -443,11 +763,5 @@ def server_error(e):
 
 # ==================== INITIALIZE ====================
 
-def init_db():
-    with app.app_context():
-        db.create_all()
-        print("✅ Database initialized!")
-
 if __name__ == '__main__':
-    init_db()
     app.run(debug=False, host='0.0.0.0', port=5000)
