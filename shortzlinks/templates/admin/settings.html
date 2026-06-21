@@ -1,0 +1,124 @@
+{% extends "admin/base.html" %}
+
+{% block page_title %}Admin Settings{% endblock %}
+
+{% block content %}
+<style>
+    .settings-container {
+        max-width: 900px;
+    }
+
+    .settings-card {
+        background: white;
+        padding: 20px;
+        border-radius: 10px;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+        margin-bottom: 20px;
+    }
+
+    .settings-card h3 {
+        margin-top: 0;
+        margin-bottom: 20px;
+        color: #333;
+    }
+
+    .admins-table {
+        width: 100%;
+        border-collapse: collapse;
+    }
+
+    .admins-table th,
+    .admins-table td {
+        padding: 12px;
+        text-align: left;
+        border-bottom: 1px solid #e2e8f0;
+    }
+
+    .admins-table th {
+        background: #f8f9fa;
+        font-weight: 600;
+    }
+</style>
+
+<div class="settings-container">
+    <!-- Current Admin Info -->
+    <div class="settings-card">
+        <h3>Your Account</h3>
+        <p><strong>Username:</strong> {{ admin.username }}</p>
+        <p><strong>Email:</strong> {{ admin.email }}</p>
+        <p><strong>Role:</strong> {{ admin.role|upper }}</p>
+        <p><strong>Last Login:</strong> {{ admin.last_login.strftime('%Y-%m-%d %H:%M') if admin.last_login else 'Never' }}</p>
+    </div>
+
+    <!-- Admin List -->
+    <div class="settings-card">
+        <h3>Admin Users</h3>
+        <table class="admins-table">
+            <thead>
+                <tr>
+                    <th>Username</th>
+                    <th>Email</th>
+                    <th>Role</th>
+                    <th>Status</th>
+                    <th>Last Login</th>
+                    <th>Action</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for admin_user in admins %}
+                <tr>
+                    <td><strong>{{ admin_user.username }}</strong></td>
+                    <td>{{ admin_user.email }}</td>
+                    <td><span class="badge badge-info">{{ admin_user.role|upper }}</span></td>
+                    <td>
+                        {% if admin_user.is_active %}
+                        <span class="badge badge-success">Active</span>
+                        {% else %}
+                        <span class="badge badge-danger">Inactive</span>
+                        {% endif %}
+                    </td>
+                    <td>{{ admin_user.last_login.strftime('%Y-%m-%d %H:%M') if admin_user.last_login else '—' }}</td>
+                    <td>
+                        <button class="btn-small btn-warning" onclick="toggleAdmin('{{ admin_user.id }}')">
+                            {% if admin_user.is_active %}Disable{% else %}Enable{% endif %}
+                        </button>
+                        {% if str(admin_user.id) != session.get('admin_id') %}
+                        <button class="btn-small btn-danger" onclick="deleteAdmin('{{ admin_user.id }}')">Delete</button>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+    </div>
+
+    <!-- System Settings -->
+    <div class="settings-card">
+        <h3>System Settings</h3>
+        <p><strong>Platform Name:</strong> Shortxlinks</p>
+        <p><strong>Default CPM Rate:</strong> $5.00</p>
+        <p><strong>Default Commission:</strong> 25%</p>
+        <p><strong>Minimum Withdrawal:</strong> $5.00</p>
+    </div>
+</div>
+
+<script>
+    function toggleAdmin(adminId) {
+        fetch(`/admin/api/admin/${adminId}/toggle`, { method: 'POST' })
+            .then(r => r.json())
+            .then(d => {
+                if (d.success) location.reload();
+            });
+    }
+
+    function deleteAdmin(adminId) {
+        if (confirm('Delete this admin? This action cannot be undone.')) {
+            fetch(`/admin/api/admin/${adminId}/delete`, { method: 'DELETE' })
+                .then(r => r.json())
+                .then(d => {
+                    if (d.success) location.reload();
+                });
+        }
+    }
+</script>
+{% endblock %}
