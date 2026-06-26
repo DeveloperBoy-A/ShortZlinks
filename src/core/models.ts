@@ -149,7 +149,12 @@ const UserSchema = new Schema(
 
     lastLogin: Date,
 
-    sessionExpires: Date
+    sessionExpires: Date,
+
+sessionId: {
+  type: String,
+  default: ""
+}
   },
   {
     timestamps: true
@@ -507,6 +512,11 @@ const NotificationSchema = new Schema(
       default: "info"
     }
   },
+
+    details: {
+  type: Schema.Types.Mixed,
+  default: {}
+},
   {
     timestamps: true
   }
@@ -687,6 +697,13 @@ const ApiKeySchema = new Schema(
       default: false
     },
 
+    lastUsedIP: {
+  type: String,
+  default: ""
+},
+
+lastUsedAt: Date,
+
     whitelistIPs: [
       {
         type: String
@@ -754,7 +771,10 @@ const AuditLogSchema = new Schema(
 
     target: String,
 
-    details: String,
+    details: {
+  type: Schema.Types.Mixed,
+  default: {}
+},
 
     ip: String
   },
@@ -817,6 +837,30 @@ const SiteSettingSchema = new Schema(
       default: true
     }
   },
+    botEnabled: {
+  type: Boolean,
+  default: false
+},
+
+defaultRouteSteps: {
+  type: Number,
+  default: 2
+},
+
+defaultStep1Timer: {
+  type: Number,
+  default: 15
+},
+
+defaultStep2Timer: {
+  type: Number,
+  default: 10
+},
+
+defaultStep3Timer: {
+  type: Number,
+  default: 10
+},
   {
     timestamps: true
   }
