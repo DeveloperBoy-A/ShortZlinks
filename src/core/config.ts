@@ -33,6 +33,7 @@ const envSchema = z.object({
 
   API_KEY_PREFIX: z.string().default("sk_live_"),
   API_RATE_LIMIT_PER_MIN: z.coerce.number().default(60),
+  ACCESS_TOKEN_MINUTES: z.coerce.number().default(15),
 
   MIN_WITHDRAW_AMOUNT: z.coerce.number().default(200),
   WITHDRAW_OPEN_DAY: z.coerce.number().default(24),
