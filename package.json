@@ -39,6 +39,7 @@
     "recharts": "^2.12.7",
     "telegraf": "^4.16.3",
     "tailwind-merge": "^2.5.2",
+    "ua-parser-js": "^1.0.39",
     "zod": "^3.23.8"
   },
   "devDependencies": {
